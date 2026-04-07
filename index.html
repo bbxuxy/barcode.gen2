@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Green POS - 100% Fixed</title>
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --primary: #27ae60; --bg: #f8faf8; }
+        body { font-family: 'Sarabun', sans-serif; margin: 0; background: var(--bg); padding-bottom: 80px; -webkit-tap-highlight-color: transparent; }
+        .container { padding: 15px; max-width: 500px; margin: auto; }
+        .nav-bar { position: fixed; bottom: 0; width: 100%; height: 65px; background: #fff; display: flex; box-shadow: 0 -2px 10px rgba(0,0,0,0.1); z-index: 9999; left: 0; border-top: 1px solid #eee; }
+        .nav-item { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 12px; color: #95a5a6; cursor: pointer; border: none; background: none; }
+        .nav-item.active { color: var(--primary); font-weight: bold; }
+        .card { background: #fff; border-radius: 12px; padding: 15px; margin-bottom: 10px; border: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+        .btn-green { background: var(--primary); color: white; border: none; padding: 14px; width: 100%; border-radius: 12px; font-weight: bold; cursor: pointer; font-size: 16px; position: relative; z-index: 10; }
+        input { width: 100%; padding: 14px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 10px; box-sizing: border-box; font-size: 16px; }
+        .scanner-container { width: 100%; border-radius: 15px; overflow: hidden; background: #000; display: none; margin-bottom: 15px; border: 3px solid var(--primary); min-height: 250px; position: relative; }
+        #reader, #reader-add { width: 100% !important; }
+        .hidden { display: none !important; }
+        .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: none; justify-content: center; align-items: center; z-index: 10000; }
+        .modal-content { background: #fff; padding: 25px; border-radius: 20px; width: 85%; max-width: 350px; text-align: center; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div id="page-receipts">
+        <h2 style="font-size:18px;">ประวัติการขาย</h2>
+        <button class="btn-green" style="margin-bottom:15px; background:#34495e" onclick="showPage('add-product')">+ ลงทะเบียนสินค้าใหม่</button>
+        <div id="receipt-list"></div>
+    </div>
+
+    <div id="page-store" class="hidden">
+        <div style="text-align: center;">
+            <button id="cam-btn" style="font-size:35px; background:#fff; border:2px solid var(--primary); border-radius:50%; width:75px; height:75px; margin-bottom:10px;" onclick="toggleScanner('reader')">📸</button>
+            <div id="wrap-reader" class="scanner-container"><div id="reader"></div></div>
+            <p id="scan-status" style="font-weight:bold; color:#7f8c8d;">กดเพื่อสแกนขาย</p>
+        </div>
+        <div id="cart-preview" class="card hidden" style="flex-direction:column; border:2px solid var(--primary);">
+            <div id="cart-items" style="width:100%; margin-bottom:15px;"></div>
+            <button class="btn-green" onclick="finalizeReceipt()">บันทึกใบเสร็จ</button>
+        </div>
+        <div id="product-list"></div>
+    </div>
+
+    <div id="page-add-product" class="hidden">
+        <h3>เพิ่มสินค้า</h3>
+        <button class="btn-green" onclick="toggleScanner('reader-add')" style="background:#3498db; margin-bottom:15px;">📷 สแกนรหัส</button>
+        <div id="wrap-reader-add" class="scanner-container"><div id="reader-add"></div></div>
+        <input type="text" id="p-id" placeholder="รหัสสินค้า">
+        <input type="text" id="p-name" placeholder="ชื่อสินค้า">
+        <input type="number" id="p-price" placeholder="ราคา">
+        <button class="btn-green" onclick="saveProduct()">บันทึก</button>
+        <button onclick="showPage('receipts')" style="width:100%; border:none; background:none; margin-top:15px; color:#95a5a6;">✕ ยกเลิก</button>
+    </div>
+</div>
+
+<div id="main-modal" class="modal" onclick="closeModal()">
+    <div class="modal-content" onclick="event.stopPropagation()">
+        <div id="modal-body"></div>
+        <button class="btn-green" style="margin-top:20px; background:#bdc3c7;" onclick="closeModal()">ปิด</button>
+    </div>
+</div>
+
+<nav class="nav-bar">
+    <div id="nav-receipts" class="nav-item active" onclick="showPage('receipts')">📄 ประวัติ</div>
+    <div id="nav-store" class="nav-item" onclick="showPage('store')">🏷️ ขาย</div>
+</nav>
+
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getDatabase, ref, set, push, onValue } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+    const db = getDatabase(initializeApp({ databaseURL: "https://yaya-9f825-default-rtdb.firebaseio.com" }));
+    let products = [], currentCart = {}, html5QrCode = null, isCooldown = false, currentStream = null;
+
+    async function releaseCamera() {
+        if (html5QrCode) {
+            try { await html5QrCode.stop(); } catch (e) {}
+            html5QrCode = null;
+        }
+        if (currentStream) {
+            currentStream.getTracks().forEach(track => track.stop());
+            currentStream = null;
+        }
+        document.querySelectorAll('.scanner-container').forEach(c => {
+            c.style.display = 'none';
+            c.innerHTML = `<div id="${c.id.replace('wrap-','')}"></div>`;
+        });
+    }
+
+    window.showPage = async (p) => {
+        await releaseCamera();
+        document.querySelectorAll('.container > div').forEach(div => div.classList.add('hidden'));
+        document.getElementById('page-' + p).classList.remove('hidden');
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        document.getElementById(p === 'add-product' ? 'nav-receipts' : 'nav-' + p).classList.add('active');
+    };
+
+    window.toggleScanner = async (elId) => {
+        if (html5QrCode) { await releaseCamera(); return; }
+        const wrap = document.getElementById('wrap-' + elId);
+        wrap.style.display = 'block';
+
+        try {
+            // บังคับขอสิทธิ์และเบิกทาง Hardware ด้วยตนเอง
+            currentStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+            
+            html5QrCode = new Html5Qrcode(elId);
+            await html5QrCode.start(
+                { facingMode: "environment" },
+                { fps: 20, qrbox: 250 },
+                (text) => {
+                    if(isCooldown) return;
+                    if(elId === 'reader-add') {
+                        document.getElementById('p-id').value = text;
+                        releaseCamera();
+                    } else {
+                        const p = products.find(i => i.id === text);
+                        if(p) {
+                            currentCart[p.id] = currentCart[p.id] ? {...currentCart[p.id], qty: currentCart[p.id].qty + 1} : {...p, qty: 1};
+                            isCooldown = true;
+                            document.getElementById('scan-status').innerText = `✔ ${p.name}`;
+                            updateCart();
+                            setTimeout(() => { isCooldown = false; }, 1000);
+                        }
+                    }
+                }
+            );
+        } catch (err) {
+            wrap.style.display = 'none';
+            alert("กล้องไม่ตอบสนอง กรุณาเปิดผ่าน HTTPS และรีเฟรชหน้าเว็บ");
+        }
+    };
+
+    window.saveProduct = async () => {
+        const id = document.getElementById('p-id').value, name = document.getElementById('p-name').value, price = document.getElementById('p-price').value;
+        if(id && name && price) {
+            await releaseCamera();
+            set(ref(db, 'products/' + id), { id, name, price: parseFloat(price) });
+            showPage('store');
+        }
+    };
+
+    window.finalizeReceipt = async () => {
+        const items = Object.values(currentCart);
+        if(!items.length) return;
+        const total = items.reduce((s, i) => s + (i.price * i.qty), 0);
+        await releaseCamera();
+        await push(ref(db, 'receipts'), { items, total, date: new Date().toLocaleString('th-TH') });
+        currentCart = {}; updateCart(); showPage('receipts');
+    };
+
+    function updateCart() {
+        const items = Object.values(currentCart);
+        document.getElementById('cart-preview').classList.toggle('hidden', !items.length);
+        document.getElementById('cart-items').innerHTML = items.map(i => `<div style="display:flex; justify-content:space-between"><span>${i.name} x${i.qty}</span><b>฿${i.price*i.qty}</b></div>`).join('');
+    }
+
+    onValue(ref(db, 'products'), s => {
+        products = s.val() ? Object.values(s.val()) : [];
+        const list = document.getElementById('product-list');
+        list.innerHTML = products.length ? '<h3 style="font-size:14px; color:#95a5a6;">สต็อกสินค้า</h3>' : '';
+        products.forEach(p => {
+            const div = document.createElement('div'); div.className = 'card';
+            div.innerHTML = `<div><b>${p.name}</b><br>฿${p.price}</div><svg id="bc-${p.id}" style="width:90px;height:40px" onclick="zoomBarcode('${p.id}')"></svg>`;
+            list.appendChild(div);
+            JsBarcode(`#bc-${p.id}`, p.id, { height: 25, width: 1.3, fontSize: 11, margin: 0 });
+        });
+    });
+
+    onValue(ref(db, 'receipts'), s => {
+        const list = document.getElementById('receipt-list'); list.innerHTML = '';
+        const data = s.val() ? Object.values(s.val()).reverse() : [];
+        data.forEach(r => {
+            const div = document.createElement('div'); div.className = 'card'; div.onclick = () => viewReceipt(r);
+            div.innerHTML = `<div><b>${r.date}</b></div><b>฿${r.total}</b>`;
+            list.appendChild(div);
+        });
+    });
+
+    window.zoomBarcode = (id) => {
+        document.getElementById('modal-body').innerHTML = `<h3>รหัส: ${id}</h3><svg id="zoom-bc"></svg>`;
+        document.getElementById('main-modal').style.display = 'flex';
+        JsBarcode("#zoom-bc", id, { width: 2, height: 100 });
+    };
+
+    window.viewReceipt = (r) => {
+        let items = r.items.map(i => `<div style="display:flex; justify-content:space-between"><span>${i.name} x${i.qty}</span><span>฿${i.price * i.qty}</span></div>`).join('');
+        document.getElementById('modal-body').innerHTML = `<h3>ใบเสร็จ</h3><small>${r.date}</small><hr>${items}<hr><b>ยอดรวม ฿${r.total}</b>`;
+        document.getElementById('main-modal').style.display = 'flex';
+    };
+
+    window.closeModal = () => document.getElementById('main-modal').style.display = 'none';
+</script>
+</body>
+</html>
